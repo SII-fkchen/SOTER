@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soter"
+version = "1.0.0"
+description = "SOTER: medical time-series foundation model built upon MIRA"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4.0",
+    "transformers>=4.40.1",
+    "accelerate>=0.28.0",
+    "datasets>=2.18.0",
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "safetensors>=0.4",
+    "tqdm",
+    "pyyaml",
+    "torchdiffeq>=0.2.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["soter*"]

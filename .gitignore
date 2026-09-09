@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+.env
+
+# Data, checkpoints, logs, results
+data/
+logs/
+results/
+checkpoints/
+final_weights/
+# Local staging dir for the HuggingFace upload (weights + duplicated modeling code)
+hf_upload/
+*.jsonl
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.log
+*.png
+nohup.out
+
+# OS / editor
+.DS_Store
+.cursor/
+.vscode/
+.idea/
