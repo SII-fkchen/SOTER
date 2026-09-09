@@ -15,6 +15,7 @@ SOTER is a domain-specialized generative time-series foundation model engineered
 - **Spatial Feature-Aware Backbone:** Employs channel-independent temporal modeling in shallow layers while restoring cross-channel interactions at the topmost attention layer to capture inter-signal physiological dependencies without premature leakage.
 - **PSD-Guided Mixture-of-Experts:** Incorporates an inspectable, deterministic routing mechanism that computes a strictly causal prefix discrete Fourier transform (DFT) to map latent states directly to fixed frequency bands, eliminating learned gating collapse and auxiliary balancing losses.
 - **Neural CDE/ODE Continuous-Time Decoder:** Advances latent representations to arbitrary query timestamps through numerical integration, seamlessly unifying observation-guided causal imputation and autonomous future forecasting.
+
 Pre-trained on 226 billion time points across diverse clinical and ambulatory waveforms, SOTER achieves good performance across out-of-distribution zero-shot forecasting, frozen linear-probe classification, and continuous-time imputation—all while activating only 20.29M parameters per inference step.
 
 <p align="center">
