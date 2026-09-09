@@ -87,6 +87,7 @@ def load_backbone(model_path: str) -> torch.nn.Module:
 
     backbone = model.model  # SoterModel
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[info] inference device: {device}")
     backbone = backbone.to(device)
     backbone.eval()
     for p in backbone.parameters():

@@ -91,6 +91,7 @@ def load_model(model_path: str, precision: str = "fp32") -> torch.nn.Module:
     model.load_state_dict(_load_state_dict(model_path), strict=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[info] inference device: {device}")
     if precision == "bf16" and device.type == "cuda":
         model = model.to(torch.bfloat16)
     model = model.to(device)
