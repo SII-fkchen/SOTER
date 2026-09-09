@@ -88,10 +88,10 @@ model.load_state_dict(load_file(f"{ckpt}/model.safetensors"), strict=True)
 model.eval().cuda()
 ```
 
-> The Hugging Face repo also ships its modeling code, so
-> `AutoModelForCausalLM.from_pretrained("YOUR_HF_USERNAME/SOTER", trust_remote_code=True)`
-> works as a convenience path; the strict load above is the recommended,
-> framework-version-independent way.
+> The Hugging Face repo hosts **weights only** — the modeling code lives here
+> in the GitHub repository. After downloading the HF snapshot, point `ckpt` at
+> it and use the strict load above (this is the recommended,
+> framework-version-independent way).
 
 ### Forecasting (zero-shot, autoregressive)
 
