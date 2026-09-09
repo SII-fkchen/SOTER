@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Part of code from MIRA (https://github.com/microsoft/MIRA)
 # Licensed under the MIT license.
 
 import warnings

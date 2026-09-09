@@ -24,9 +24,6 @@ from typing import Dict, Any, Optional, List, Union, Callable
 
 logger = logging.get_logger(__name__)
 
-# if is_flash_attn_2_available():
-#     from flash_attn import flash_attn_func, flash_attn_varlen_func
-#     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
@@ -62,28 +59,7 @@ def load_balancing_loss_func(
         num_experts: int = None,
         attention_mask: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
-    r"""
-    Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
-
-    See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details. This function implements the loss
-    function presented in equations (4) - (6) of the paper. It aims at penalizing cases where the routing between
-    experts is too unbalanced.
-
-    Args:
-        gate_logits (Union[`torch.Tensor`, Tuple[torch.Tensor], List[torch.Tensor]):
-            Logits from the `gate`, should be a tuple of model.config.num_hidden_layers tensors of
-            shape [batch_size X sequence_length, num_experts].
-        top_k (`int`)
-            Selected Top k over the experts.
-        attention_mask (`torch.Tensor`, None):
-            The attention_mask used in forward function
-            shape [batch_size X sequence_length] if not None.
-        num_experts (`int`, *optional*):
-            Number of experts
-
-    Returns:
-        The auxiliary loss.
-    """
+    """Computes the auxiliary load balancing loss for MoE routing."""
     if gate_logits is None or not isinstance(gate_logits, (tuple, list)) or gate_logits[0] is None:
         return 0.0
 
@@ -139,10 +115,7 @@ def load_balancing_loss_func(
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
+    """Repeat key/value heads n_rep times (equivalent to torch.repeat_interleave along dim=1)."""
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
@@ -160,26 +133,7 @@ def rotate_half(x):
 
 # Copied from transformers.models.mistral.modeling_mistral.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`):
-            The position indices of the tokens corresponding to the query and key tensors. For example, this can be
-            used to pass offsetted position ids when working with a KV-cache.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
+    """Applies Rotary Position Embedding to the query and key tensors."""
     cos = cos[position_ids].unsqueeze(unsqueeze_dim)
     sin = sin[position_ids].unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -188,9 +142,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
 
 class MIRAInputEmbedding(nn.Module):
-    """
-    Use a mlp layer to embedding the time-series.
-    """
+    """Embed the time-series with a gated linear layer."""
 
     def __init__(self, config: SoterConfig):
         super().__init__()
@@ -207,7 +159,7 @@ class MIRAInputEmbedding(nn.Module):
 
 
 class ContinuousTimeRotaryEmbedding(nn.Module):
-    """Continuous-Time Rotary Positional Encoding (CT-RoPE) based on paper description."""
+    """Continuous-Time Rotary Positional Encoding (CT-RoPE)."""
     def __init__(self, dim, base=10000.0, device=None):
         super().__init__()
         self.dim = dim
@@ -232,10 +184,7 @@ class ContinuousTimeRotaryEmbedding(nn.Module):
             if self._cos_cached.device == device and self._cos_cached.dtype == dtype:
                  return self._cos_cached, self._sin_cached
 
-        # Compute angles theta_i(t) = omega_i * t
-        # t shape: [batch, seq_len]
-        # inv_freq shape: [dim/2]
-        # freqs shape: [batch, seq_len, dim/2]
+        # angles theta_i(t) = omega_i * t; freqs shape [batch, seq_len, dim/2]
         freqs = torch.einsum('b s, d -> b s d', t.to(device=device, dtype=torch.float32), self.inv_freq)
 
         # Concatenate for full dimension embedding
@@ -298,7 +247,7 @@ class MIRARotaryEmbedding(torch.nn.Module):
         t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
 
         freqs = torch.outer(t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        # Uses a different permutation to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
@@ -351,7 +300,6 @@ class MIRAMLP(MIRATemporalBlock):
         return super().forward(hidden_state), None
 
 
-# Copied from time_moe.models.modeling_time_moe
 class MIRASparseExpertsLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -381,7 +329,6 @@ class MIRASparseExpertsLayer(nn.Module):
         self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
 
     def forward(self, hidden_states: torch.Tensor):
-        """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits -> (batch * sequence_length, n_experts)
@@ -452,12 +399,7 @@ class SoterSparseExpertsLayer(nn.Module):
         )
 
     def _causal_psd_router_logits_for_loop(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """
-        Build strictly causal PSD routing:
-        router logits at token t are computed from prefix hidden_states[:, :t+1, :].
-        This implementation is mathematically equivalent to per-step prefix rFFT,
-        but uses incremental DFT state updates to avoid recomputing FFT from scratch.
-        """
+        """Strictly causal PSD routing via incremental DFT updates (equivalent to per-step prefix rFFT)."""
         b_c, seq_len, _ = hidden_states.shape
         hidden_float = hidden_states.float()
         hidden_complex = hidden_float.to(torch.complex64)
@@ -489,11 +431,7 @@ class SoterSparseExpertsLayer(nn.Module):
         return torch.stack(router_logits_seq, dim=1).reshape(b_c * seq_len, self.num_experts)
 
     def _causal_psd_router_logits_prefix_parallel(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """
-        Tensorized causal PSD routing via prefix cumulative sum:
-          X_t(k,h) = sum_{tau<=t} x_tau(h) * exp(-j*2*pi*k*tau/N)
-        This removes Python for-loop over sequence length and runs as batched kernels.
-        """
+        """Tensorized causal PSD routing via prefix cumulative sum over the sequence."""
         b_c, seq_len, hidden_dim = hidden_states.shape
         device = hidden_states.device
         freq_bins = self.fft_size // 2 + 1
@@ -553,10 +491,7 @@ class SoterSparseExpertsLayer(nn.Module):
         return final_hidden_states, router_logits
         
 class MIRAAttention(nn.Module):
-    """
-    Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
-    and "Generating Long Sequences with Sparse Transformers".
-    """
+    """Multi-headed attention."""
 
     def __init__(self, config: SoterConfig, layer_idx: Optional[int] = None):
         super().__init__()
@@ -762,11 +697,7 @@ class MIRAFlashAttention2(MIRAAttention):
 
         dropout_rate = self.attention_dropout if self.training else 0.0
 
-        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-        # therefore the input hidden states gets silently casted in float32. Hence, we need
-        # cast them back in the correct dtype just to be sure everything works as expected.
-        # This might slowdown training & inference so it is recommended to not cast the LayerNorms
-        # in fp32. (LlamaRMSNorm handles it correctly)
+        # Cast hidden states that were silently upcast to float32 back to the correct dtype.
 
         input_dtype = query_states.dtype
         if input_dtype == torch.float32:
@@ -804,29 +735,11 @@ class MIRAFlashAttention2(MIRAAttention):
     def _flash_attention_forward(
             self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
     ):
-        """
-        Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
-        first unpad the input, then computes the attention scores and pad the final attention scores.
-
-        Args:
-            query_states (`torch.Tensor`):
-                Input query states to be passed to Flash Attention API
-            key_states (`torch.Tensor`):
-                Input key states to be passed to Flash Attention API
-            value_states (`torch.Tensor`):
-                Input value states to be passed to Flash Attention API
-            attention_mask (`torch.Tensor`):
-                The padding mask - corresponds to a tensor of size `(batch_size, seq_len)` where 0 stands for the
-                position of padding tokens and 1 for the position of non-padding tokens.
-            dropout (`float`):
-                Attention dropout
-            softmax_scale (`float`, *optional*):
-                The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
-        """
+        """Flash Attention forward, casting inputs to bf16/fp16 when needed."""
         if not self._flash_attn_uses_top_left_mask:
             causal = self.is_causal
         else:
-            # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in LlamaFlashAttention2 __init__.
+            # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1.
             causal = self.is_causal and query_length != 1
 
         origin_dtype = query_states.dtype
@@ -930,19 +843,6 @@ class MIRADecoderLayer(nn.Module):
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. "
                 "Please make sure use `attention_mask` instead.`"
             )
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-                `(batch, sequence_length)` where padding elements are indicated by 0.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
-        """
 
         residual = hidden_states
 
@@ -1057,11 +957,7 @@ class MIRAPreTrainedModel(PreTrainedModel):
     _supports_cache_class = True
 
     def _initialize_weights(self, module, is_remote_code: bool = False):
-        # Never re-initialize parameters that were just loaded from a checkpoint
-        # (they carry the `_is_hf_initialized` flag). The base implementation only
-        # applies this param-level check for remote-code models; without it,
-        # `from_pretrained` would silently re-randomize every nn.Linear/Embedding
-        # after loading when this package is used locally.
+        # Never re-initialize parameters that were just loaded from a checkpoint.
         if getattr(module, "_is_hf_initialized", False):
             return
         direct_params = list(module.parameters(recurse=False))
@@ -1086,15 +982,11 @@ class MIRAPreTrainedModel(PreTrainedModel):
                 nn.init.zeros_(module.weight[module.padding_idx])
 
 
-# =========================================================================
-# Replacement 4: modify the backbone model to implement multi-channel folding and safe alignment in CI mode
-# =========================================================================
+# Backbone model with multi-channel folding and safe alignment in CI mode
 class SoterModel(MIRAPreTrainedModel):
     """
-    SOTER backbone: a T-shaped architecture that stacks channel-independent (CI)
-    layers for per-channel temporal modeling with CT-RoPE, followed by
-    channel-dependence (CD) layers (``config.cd_layers``) that attend across
-    channels at the same time step.
+    SOTER backbone: channel-independent (CI) layers with CT-RoPE, followed by
+    channel-dependent (CD) layers (``config.cd_layers``) that attend across channels.
     """
 
     def __init__(self, config: SoterConfig):
@@ -1143,9 +1035,7 @@ class SoterModel(MIRAPreTrainedModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # =================================================================
-        # 1. Core innovation: CI channel-folding mechanism (Channel Independence)
-        # =================================================================
+        # 1. CI channel folding (channel independence)
         num_channels = 1
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
@@ -1171,9 +1061,7 @@ class SoterModel(MIRAPreTrainedModel):
             if use_cache:
                 use_cache = False
 
-        # =================================================================
         # 2. Dimension-safe cloning of auxiliary variables (aligned to B * C)
-        # =================================================================
         effective_batch_size = batch_size * num_channels
 
         # Align time_values: [Batch, SeqLen] -> [Batch * Channel, SeqLen]
@@ -1230,9 +1118,7 @@ class SoterModel(MIRAPreTrainedModel):
         all_router_logits = ()
         next_decoder_cache = None
 
-        # =================================================================
-        # 3. Iterate through the T-shaped network (pass num_channels for CD-layer reshaping)
-        # =================================================================
+        # 3. Iterate through the layers (pass num_channels for CD-layer reshaping)
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -1272,12 +1158,7 @@ class SoterModel(MIRAPreTrainedModel):
         # First apply global normalization at the [B*C, L, H] scale
         hidden_states = self.norm(hidden_states)
 
-        # =================================================================
-        # 4. Feature unfolding and spatial restoration
-        # =================================================================
-        # Restoration logic: [Batch * Channel, SeqLen, Hidden] 
-        # -> view: [Batch, Channel, SeqLen, Hidden] 
-        # -> transpose: [Batch, SeqLen, Channel, Hidden]
+        # 4. Restore features: [B*C, L, H] -> [B, C, L, H] -> [B, L, C, H]
         hidden_states = hidden_states.view(batch_size, num_channels, seq_length, -1).transpose(1, 2).contiguous()
 
         if output_hidden_states:
@@ -1304,11 +1185,7 @@ class SoterModel(MIRAPreTrainedModel):
     
 
 class ODEFunc(nn.Module):
-    """
-    Time-augmented dynamics: dh/ds = f(s, h[, z]).
-    - Future prediction: z=None -> pure Neural ODE (time s only).
-    - Mask prediction: z = spline(t) -> CDE driven by cubic-spline control path.
-    """
+    """Time-augmented dynamics dh/ds = f(s, h[, z]); optional spline control path z for CDE."""
     def __init__(self, config: SoterConfig):
         super().__init__()
         self.config = config
@@ -1360,67 +1237,6 @@ class TerminalODEBlock(nn.Module):
         self.atol = config.ode_solver_atol
         self.rtol = config.ode_solver_rtol
 
-    # def forward(self, h_N: torch.Tensor, t_N: torch.Tensor, t_Nplus1: torch.Tensor):
-    #     if self.ode_func is None:
-    #         raise RuntimeError("torchdiffeq is not installed, cannot use TerminalODEBlock.")
-
-    #     if h_N.dim() != 2: raise ValueError(f"Expected h_N [B, D], got {h_N.shape}")
-    #     if t_N.dim() > 1 or t_Nplus1.dim() > 1: warnings.warn("ODE time inputs have >1 dim, ensure compatibility.")
-
-    #     # ODE solver expects time points as a 1D tensor.
-    #     delta_t = t_Nplus1 - t_N
-    #     # Handle cases where delta_t might be zero or negative per batch item
-    #     # We consider delat_t smaller than 1 as regular time interval as pos_ids: 0,1,2...
-    #     if torch.any(delta_t <= 1):
-    #          warnings.warn("ODE integration interval delta_t <= 0 detected for some batch items. Returning initial state h_N for those items.")
-    #          # Identify indices where delta_t > 0
-    #          valid_indices = delta_t > 0
-    #          if not torch.any(valid_indices): return h_N # All invalid, return original
-             
-    #          # Prepare inputs only for valid indices
-    #          h_N_valid = h_N[valid_indices]
-    #          delta_t_valid = delta_t[valid_indices]
-    #          max_delta_t = torch.max(delta_t_valid)
-    #          t_eval = torch.tensor([0.0, max_delta_t.item()], device=h_N.device)
-
-    #          # Solve ODE only for valid batch items
-    #          solution_valid = odeint(
-    #              self.ode_func, h_N_valid, t_eval,
-    #              method=self.ode_method, atol=self.atol, rtol=self.rtol,
-    #              adjoint_params=tuple(self.parameters()) # Pass ODEFunc params for adjoint
-    #          )
-    #          h_extrapolated_valid = solution_valid[-1] # State at max_delta_t [N_valid, D]
-
-    #          if torch.any(delta_t <= 1):
-    #              warnings.warn("delta_t negative detected, returning input state for those items.")
-    #              # For now, just solve for the whole batch using first item's delta_t for t_eval shape
-    #              # This requires user to ensure valid delta_t or handle results carefully.
-    #              t_eval = torch.tensor([0.0, delta_t[0].item()], device=h_N.device)
-
-    #     else:
-    #         # All delta_t are positive, use the first one to define t_eval interval points
-    #         t_eval = torch.tensor([0.0, delta_t[0].item()], device=h_N.device)
-
-
-    #     # --- Solve ODE (relative time integral) ---
-    #     solution = odeint(
-    #         self.ode_func,
-    #         h_N, # Initial condition y0 [B, D]
-    #         t_eval, # Evaluate at relative time 0 and delta_t [2]
-    #         method=self.ode_method,
-    #         atol=self.atol,
-    #         rtol=self.rtol,
-    #         adjoint_params=tuple(p for p in self.ode_func.parameters() if p.requires_grad) # Adjoint needs params
-    #     )
-
-    #     # Extract the solution at the end of the interval (relative time delta_t)
-    #     h_extrapolated = solution[-1] # Shape [B, D]
-
-    #     # If some intervals were invalid, restore original h_N for those
-    #     if torch.any(delta_t <= 0):
-    #          h_extrapolated[delta_t <= 0] = h_N[delta_t <= 0]
-
-    #     return h_extrapolated
     def forward(
         self,
         h_N: torch.Tensor,
@@ -1429,10 +1245,7 @@ class TerminalODEBlock(nn.Module):
         control_path_callable: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         num_channels: int = 1,
     ):
-        """
-        Future prediction: control_path_callable=None -> Neural ODE (degenerate).
-        Mask prediction: control_path_callable(t_phys) returns z [B*C, control_dim] -> time-augmented CDE.
-        """
+        """Integrate from t_N to t_Nplus1; optional spline control path turns this into a time-augmented CDE."""
         if self.ode_func is None:
             raise RuntimeError("torchdiffeq is not installed, cannot use TerminalODEBlock.")
 
@@ -1478,10 +1291,8 @@ class TerminalODEBlock(nn.Module):
             return solution[-1]
 
         if torch.is_inference_mode_enabled():
-            # torchdiffeq's adaptive solvers can underflow the step size when
-            # called inside torch.inference_mode (inference tensors lack version
-            # counters). Evaluation needs no gradients, so solve in a plain
-            # no-grad region with cloned, non-inference tensors instead.
+            # torchdiffeq adaptive solvers can underflow the step size under torch.inference_mode;
+            # solve in a plain no-grad region with cloned, non-inference tensors.
             with torch.inference_mode(False), torch.no_grad():
                 return solve(h_N.clone(), t_N.clone(), t_Nplus1.clone(), delta_t.clone())
 
@@ -1500,14 +1311,7 @@ class MIRAOutputLayer(nn.Module):
         )
 
     def forward(self, x):
-        """
-
-        Args:
-            x (torch.FloatTensor): with shape [B, seq_len, hidden_size]
-
-        Returns:
-    `       torch.FloatTensor: final prediction with shape [B, seq_len, input_size]
-        """
+        """Linear projection to the prediction horizon."""
         return self.out_layer(x)
 
 
@@ -1552,9 +1356,7 @@ class SoterForPrediction(MIRAPreTrainedModel, MIRAGenerationMixin):
             self.horizon_length_map[horizon_length] = i
         self.lm_heads = nn.ModuleList(lm_head_list)
         
-        # Regression loss for time-series forecasting.
-        # NOTE: avoid using attribute name `loss_function` because recent
-        # transformers versions define model.loss_function for LM losses.
+        # Regression loss; avoid the attribute name `loss_function` (reserved by recent transformers for LM losses).
         self.regression_loss_fn = torch.nn.HuberLoss(reduction='none', delta=2.0)
         self.post_init()
 
@@ -1626,11 +1428,7 @@ class SoterForPrediction(MIRAPreTrainedModel, MIRAGenerationMixin):
         
         hidden_states_for_head = hidden_states_last  # passed through directly by default when ODE is disabled
 
-        # =========================================================================
-        # Core: Terminal ODE / CDE multi-channel integration
-        # - Future prediction: no control -> degenerates to a Neural ODE
-        # - Mask prediction: cubic spline fitted to the observations (time, value) -> time-augmented CDE, control_path_callable provides z(t)
-        # =========================================================================
+        # Terminal ODE / CDE extrapolation from the last hidden state (spline control when observations are given)
         if (
             self.use_terminal_ode
             and self.ode_extrapolation_block is not None
@@ -1761,7 +1559,6 @@ class SoterForPrediction(MIRAPreTrainedModel, MIRAGenerationMixin):
         losses = self.regression_loss_fn(shift_predictions, shift_labels)
         if loss_masks is not None:
             losses = losses * loss_masks
-            # loss = losses.sum() / loss_masks.sum()
             loss = losses.sum() / (loss_masks.sum() * shift_predictions.shape[-1])
         else:
             loss = torch.mean(losses)

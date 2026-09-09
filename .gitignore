@@ -28,6 +28,7 @@ hf_upload/
 *.pth
 *.log
 *.png
+!overview_framework.png
 nohup.out
 
 # OS / editor

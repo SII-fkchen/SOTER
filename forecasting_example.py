@@ -1,34 +1,6 @@
 #!/usr/bin/env python
 """
 Zero-shot forecasting example for SOTER.
-
-SOTER forecasts autoregressively: given a context window of (value, timestamp)
-pairs it predicts the value at the next *target timestamp* by integrating its
-terminal ODE block from the last observed time to the target time, then feeds
-the prediction back and repeats.
-
-Usage
------
-1) Synthetic demo (no data needed):
-
-    python examples/forecasting_example.py --demo \
-        --model /path/to/checkpoint-1000000
-
-2) Forecast your own JSONL data (see README.md "Input data format"):
-
-    python examples/forecasting_example.py \
-        --model /path/to/checkpoint-1000000 \
-        --data ./data/processed_jsonl/MIT_BIH_OOD/test_set.jsonl \
-        --train_jsonl ./data/processed_jsonl/MIT_BIH_OOD/train_set.jsonl \
-        --context 128 --horizon 64 --num_eval 32 \
-        --plot forecast.png
-
-Normalization protocol
-----------------------
-The released checkpoint was trained with per-channel MinMax scaling fitted on
-the *training* split. Pass `--train_jsonl` to reproduce that protocol. If no
-training file is given, the example falls back to per-window z-score
-normalization, which also works reasonably in practice.
 """
 
 from __future__ import annotations
@@ -36,20 +8,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Allow running directly from the repo without installing the package.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-
-# ---------------------------------------------------------------------------
-# Model loading
-# ---------------------------------------------------------------------------
 
 def _load_state_dict(ckpt_dir: str) -> dict:
     """Read raw weights from a checkpoint directory (safetensors or pytorch bin)."""
@@ -73,12 +40,7 @@ def _load_state_dict(ckpt_dir: str) -> dict:
     raise FileNotFoundError(f"No model weights found in {ckpt_dir}")
 
 
-def load_model(model_path: str, precision: str = "fp32") -> torch.nn.Module:
-    """Load SOTER with a strict state-dict load (the protocol used in the paper).
-
-    Accepts a local checkpoint directory or a Hugging Face hub id (the weights
-    are downloaded as a local snapshot first, then loaded strictly).
-    """
+def load_model(model_path: str) -> Tuple[torch.nn.Module, torch.device]:
     from soter.models.modeling_soter import SoterConfig, SoterForPrediction
 
     if not Path(model_path).is_dir():
@@ -92,16 +54,11 @@ def load_model(model_path: str, precision: str = "fp32") -> torch.nn.Module:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[info] inference device: {device}")
-    if precision == "bf16" and device.type == "cuda":
-        model = model.to(torch.bfloat16)
     model = model.to(device)
     model.eval()
-    return model
+    return model, device
 
 
-# ---------------------------------------------------------------------------
-# Data utilities (JSONL: one record per line, see README.md)
-# ---------------------------------------------------------------------------
 
 def load_jsonl(path: str) -> List[dict]:
     records = []
@@ -114,7 +71,6 @@ def load_jsonl(path: str) -> List[dict]:
 
 
 def ensure_strictly_increasing(times: np.ndarray, eps: float = 1e-4) -> np.ndarray:
-    """The ODE solver requires strictly increasing timestamps."""
     t = times.astype(np.float32).copy()
     for i in range(1, t.shape[0]):
         if t[i] <= t[i - 1]:
@@ -123,7 +79,6 @@ def ensure_strictly_increasing(times: np.ndarray, eps: float = 1e-4) -> np.ndarr
 
 
 def as_multichannel(rec: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (sequence [L, C], time [L], mask [L, C]) from one JSONL record."""
     seq = np.asarray(rec["sequence"], dtype=np.float32)
     if seq.ndim == 1:
         seq = seq.reshape(-1, 1)
@@ -138,10 +93,24 @@ def as_multichannel(rec: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return seq, t, m
 
 
-def fit_minmax_scalers(records: List[dict], num_channels: int):
-    """Fit one MinMaxScaler per channel on the training split (paper protocol)."""
+def infer_max_channel_count(records: List[dict]) -> int:
+    n_ch = 0
+    for rec in records:
+        seq = np.asarray(rec.get("sequence"), dtype=np.float32)
+        if seq.ndim == 1 and seq.size:
+            n_ch = max(n_ch, 1)
+        elif seq.ndim == 2 and seq.shape[1] > 0:
+            n_ch = max(n_ch, int(seq.shape[1]))
+    if n_ch <= 0:
+        raise ValueError("Cannot infer channel count from JSONL records.")
+    return n_ch
+
+
+def fit_minmax_scalers(records: List[dict]):
+    """Fit one MinMaxScaler per channel on the training split"""
     from sklearn.preprocessing import MinMaxScaler
 
+    num_channels = infer_max_channel_count(records)
     vals: List[List[np.ndarray]] = [[] for _ in range(num_channels)]
     for rec in records:
         seq, _, m = as_multichannel(rec)
@@ -160,9 +129,8 @@ def fit_minmax_scalers(records: List[dict], num_channels: int):
     return scalers
 
 
-# ---------------------------------------------------------------------------
+
 # Autoregressive forecasting
-# ---------------------------------------------------------------------------
 
 @torch.inference_mode()
 def forecast_channel(
@@ -171,15 +139,16 @@ def forecast_channel(
     times: np.ndarray,
     context: int,
     horizon: int,
+    device: torch.device,
+    amp_dtype: torch.dtype = None,
 ) -> np.ndarray:
     """
-    Forecast one (already normalized) univariate series.
-
-    history: [context + horizon] normalized values
+    Autoregressive rollout over the horizon.
+    history: [context + horizon] normalized values (only the first `context`
+             values are shown to the model; its own predictions are fed back)
     times:   [context + horizon] raw timestamps (strictly increasing)
     returns: [horizon] predictions in normalized space
     """
-    device = next(model.parameters()).device
     preds = np.zeros((horizon,), dtype=np.float32)
 
     cur_vals = torch.from_numpy(history[:context]).float().view(1, -1, 1).to(device)  # [1, L, 1]
@@ -193,55 +162,65 @@ def forecast_channel(
             next_t_val = last_t_val + 1e-4
         next_t = torch.tensor([next_t_val], device=device, dtype=torch.float32)
 
-        out = model(
-            input_ids=cur_vals,
-            time_values=cur_times,
-            next_target_time_values=next_t,  # ODE integrates from t_last to this time
-            attention_mask=torch.ones(cur_vals.shape[0], cur_vals.shape[1], dtype=torch.long, device=device),
-            return_dict=True,
-        )
-        next_val = out.logits[0, -1, 0].float().cpu()
-        preds[step] = float(next_val)
+        with torch.amp.autocast(device_type="cuda", enabled=amp_dtype is not None,
+                                dtype=amp_dtype if amp_dtype is not None else torch.bfloat16):
+            out = model(
+                input_ids=cur_vals,
+                time_values=cur_times,
+                next_target_time_values=next_t,  # ODE integrates from t_last to this time
+                attention_mask=torch.ones(cur_vals.shape[0], cur_vals.shape[1], dtype=torch.long, device=device),
+                return_dict=True,
+            )
+        next_val = out.logits[0, -1, 0].detach().float()  # stays on `device`
+        preds[step] = float(next_val.cpu())
 
         # Feed the prediction back for the next step (autoregressive rollout).
-        cur_vals = torch.cat([cur_vals, next_val.view(1, 1, 1)], dim=1)
+        cur_vals = torch.cat([cur_vals, next_val.view(1, 1, 1).to(cur_vals.dtype)], dim=1)
         cur_times = torch.cat(
             [cur_times, torch.tensor([[next_t_val]], device=device)], dim=1
         )
     return preds
 
 
-# ---------------------------------------------------------------------------
-# Evaluation loop
-# ---------------------------------------------------------------------------
+def run_evaluation(args, model, device, amp_dtype) -> None:
+    from tqdm import tqdm
 
-def run_evaluation(args, model) -> None:
     records = load_jsonl(args.data)
-    rng = np.random.default_rng(args.seed)
-    idxs = rng.permutation(len(records))[: args.num_eval]
-
-    ctx, horizon = args.context, args.horizon
-    num_channels = int(as_multichannel(records[int(idxs[0])])[0].shape[1])
 
     if args.train_jsonl:
         print(f"[info] fitting per-channel MinMaxScaler on {args.train_jsonl}")
-        scalers = fit_minmax_scalers(load_jsonl(args.train_jsonl), num_channels)
+        scalers = fit_minmax_scalers(load_jsonl(args.train_jsonl))
+        n_ch_expected = len(scalers)
     else:
         print("[info] no --train_jsonl given; falling back to per-window z-score normalization")
         scalers = None
+        n_ch_expected = infer_max_channel_count(records)
+    print(f"[info] channel count: {n_ch_expected}")
 
-    per_ch_sq: List[List[float]] = [[] for _ in range(num_channels)]
-    per_ch_abs: List[List[float]] = [[] for _ in range(num_channels)]
-    plotted = False
+    idxs = list(range(len(records)))
+    if str(args.num_eval).lower() == "all":
+        pass  # full-file inference, in file order
+    else:
+        rng = random.Random(args.seed)
+        rng.shuffle(idxs)
+        idxs = idxs[: min(int(args.num_eval), len(idxs))]
+    print(f"[info] evaluating {len(idxs)} sequence(s) from {args.data}")
 
-    for i in idxs:
-        seq, t, m = as_multichannel(records[int(i)])
-        if seq.shape[0] < ctx + horizon or seq.shape[1] != num_channels:
+    ctx, horizon = args.context, args.horizon
+    sample_rmses: List[float] = []
+    sample_maes: List[float] = []
+
+    for i in tqdm(idxs, desc="evaluating", unit="seq"):
+        seq, t, m = as_multichannel(records[i])
+        if seq.shape[0] < ctx + horizon:
             continue
         seq, t, m = seq[: ctx + horizon], ensure_strictly_increasing(t[: ctx + horizon]), m[: ctx + horizon]
+        if seq.shape[1] != n_ch_expected:
+            continue
 
-        gt_plot = pred_plot = ctx_plot = None
-        for c in range(num_channels):
+        ch_rmse_i: List[float] = []
+        ch_mae_i: List[float] = []
+        for c in range(n_ch_expected):
             if scalers is not None:
                 seq_norm = (
                     scalers[c]
@@ -253,51 +232,25 @@ def run_evaluation(args, model) -> None:
                 mu, sd = float(seq[:ctx, c].mean()), float(seq[:ctx, c].std()) + 1e-6
                 seq_norm = ((seq[:, c] - mu) / sd).astype(np.float32)
 
-            preds = forecast_channel(model, seq_norm, t, ctx, horizon)
+            preds = forecast_channel(model, seq_norm, t, ctx, horizon, device, amp_dtype)
             gt = seq_norm[ctx : ctx + horizon]
             valid = m[ctx : ctx + horizon, c] == 1
             if np.any(valid):
                 err = preds[valid] - gt[valid]
-                per_ch_sq[c].extend((err * err).tolist())
-                per_ch_abs[c].extend(np.abs(err).tolist())
+                ch_rmse_i.append(math.sqrt(float(np.mean(err * err))))  # this channel's RMSE
+                ch_mae_i.append(float(np.mean(np.abs(err))))            # this channel's MAE
 
-            if c == 0 and not plotted:
-                ctx_plot, gt_plot, pred_plot = seq_norm[:ctx], gt, preds
+        if ch_rmse_i:
+            sample_rmses.append(float(np.mean(ch_rmse_i)))  # macro over channels
+            sample_maes.append(float(np.mean(ch_mae_i)))
 
-        if args.plot and not plotted and gt_plot is not None:
-            save_plot(ctx_plot, gt_plot, pred_plot, args.plot)
-            plotted = True
-
-    ch_rmse = [math.sqrt(np.mean(sq)) if sq else float("nan") for sq in per_ch_sq]
-    ch_mae = [float(np.mean(ab)) if ab else float("nan") for ab in per_ch_abs]
-    rmse = float(np.nanmean(ch_rmse))
-    mae = float(np.nanmean(ch_mae))
-    print(f"[result] context={ctx} horizon={horizon} | RMSE(macro over channels)={rmse:.4f} | MAE={mae:.4f}")
+    # Average the per-sample scores over all evaluated sequences.
+    rmse = float(np.mean(sample_rmses)) if sample_rmses else float("nan")
+    mae = float(np.mean(sample_maes)) if sample_maes else float("nan")
+    print(f"[result] context={ctx} horizon={horizon} | RMSE={rmse:.6f} | MAE={mae:.6f} (n={len(sample_rmses)})")
 
 
-def save_plot(context_vals: np.ndarray, gt: np.ndarray, preds: np.ndarray, out_path: str) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    ctx = len(context_vals)
-    plt.figure(figsize=(10, 4))
-    plt.plot(range(ctx), context_vals, color="black", label="Context (observed)")
-    plt.plot(range(ctx, ctx + len(gt)), gt, "b--", label="Future (ground truth)")
-    plt.plot(range(ctx, ctx + len(preds)), preds, "r", label="Future (SOTER prediction)")
-    plt.axvline(x=ctx - 1, color="gray", linestyle=":")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    print(f"[info] saved forecast plot to {out_path}")
-
-
-# ---------------------------------------------------------------------------
-# Synthetic demo
-# ---------------------------------------------------------------------------
-
-def run_demo(args, model) -> None:
+def run_demo(args, model, device, amp_dtype) -> None:
     """Forecast a synthetic noisy sinusoid with irregular timestamps."""
     rng = np.random.default_rng(args.seed)
     ctx, horizon = args.context, args.horizon
@@ -310,15 +263,12 @@ def run_demo(args, model) -> None:
     mu, sd = float(signal[:ctx].mean()), float(signal[:ctx].std()) + 1e-6
     seq_norm = ((signal - mu) / sd).astype(np.float32)
 
-    preds = forecast_channel(model, seq_norm, t, ctx, horizon)
+    preds = forecast_channel(model, seq_norm, t, ctx, horizon, device, amp_dtype)
     gt = seq_norm[ctx : ctx + horizon]
     rmse = float(np.sqrt(np.mean((preds - gt) ** 2)))
     print(f"[demo] synthetic series | RMSE={rmse:.4f} (normalized space)")
     print("[demo] first 8 predictions:", np.round(preds[:8], 3).tolist())
     print("[demo] first 8 ground truth:", np.round(gt[:8], 3).tolist())
-
-    if args.plot:
-        save_plot(seq_norm[:ctx], gt, preds, args.plot)
 
 
 def main() -> None:
@@ -331,18 +281,25 @@ def main() -> None:
     parser.add_argument("--demo", action="store_true", help="Run on a synthetic series instead of real data")
     parser.add_argument("--context", type=int, default=128, help="Context window length")
     parser.add_argument("--horizon", type=int, default=64, help="Forecast horizon")
-    parser.add_argument("--num_eval", type=int, default=32, help="Number of sequences to evaluate")
-    parser.add_argument("--precision", type=str, choices=["fp32", "bf16"], default="fp32")
-    parser.add_argument("--plot", type=str, default=None, help="Optional path to save a forecast plot (png)")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--num_eval", type=str, default="32",
+                        help="Number of sequences to evaluate, or 'all' for the whole file")
+    parser.add_argument("--precision", type=str, choices=["fp32", "bf16", "fp16"], default="bf16",
+                        help="Autocast precision for inference on GPU (paper evaluation used bf16)")
+    parser.add_argument("--seed", type=int, default=223)
     args = parser.parse_args()
 
-    model = load_model(args.model, args.precision)
+    model, device = load_model(args.model)
+
+    amp_dtype = None
+    if device.type == "cuda":
+        amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(args.precision)
+    elif args.precision != "fp32":
+        print(f"[info] precision={args.precision} ignored on CPU; running fp32")
 
     if args.demo or not args.data:
-        run_demo(args, model)
+        run_demo(args, model, device, amp_dtype)
     else:
-        run_evaluation(args, model)
+        run_evaluation(args, model, device, amp_dtype)
 
 
 if __name__ == "__main__":

@@ -20,23 +20,7 @@ def build_spline_control_callable(
     device: torch.device,
     dtype: torch.dtype = torch.float32,
 ) -> Optional[Callable[[torch.Tensor], torch.Tensor]]:
-    """
-    Fit cubic spline to observed (time, value) per batch and per channel.
-    Returns a callable z(t_eval) for CDE control path.
-
-    Args:
-        time_values: [B, L] time stamps
-        observation_values: [B, L, C] or [B, L] observed values (masked positions can be any)
-        observation_mask: [B, L] 1 = observed, 0 = missing
-        device, dtype: output device and dtype
-
-    Returns:
-        callable: (t_eval) -> [B*C, control_dim]
-            t_eval: [B] physical times at which to evaluate (one per batch item).
-            For CDE we evaluate at same t for all channels of a batch item,
-            so output is (B, C, 1) flattened to (B*C, 1) to match h_N_flat.
-        Returns None if spline fitting is not possible (e.g. too few points).
-    """
+    """Fit cubic spline to observed (time, value) per batch and channel; return a callable z(t_eval) for the CDE control path (None if fitting is not possible)."""
     if not HAS_SCIPY:
         return None
 
@@ -59,10 +43,6 @@ def build_spline_control_callable(
                 valid = mask_np[b] > 0
             t_bc = time_np[b, valid]
             v_bc = obs_np[b, valid, c]
-        # for c in range(C):
-        #     valid = mask_np[b] > 0
-        #     t_bc = time_np[b, valid]
-        #     v_bc = obs_np[b, valid, c]
             if len(t_bc) < 2:
                 row.append(None)
                 continue

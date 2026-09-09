@@ -88,8 +88,7 @@ class SoterConfig(PretrainedConfig):
         self.ode_activation_threshold = ode_activation_threshold
         self.cde_control_dim = cde_control_dim
 
-        # Keep SOTER routing deterministic; never allow aux routing loss from upstream configs.
-        # Some borrowed configs (e.g., TimeMoE) set apply_aux_loss=True, which must be forced off.
+        # disable aux loss
         if apply_aux_loss:
             logger.warning("Overriding apply_aux_loss=True -> False for SOTER deterministic PSD routing.")
         self.apply_aux_loss = False
