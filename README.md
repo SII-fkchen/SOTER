@@ -135,11 +135,11 @@ This project is released under the [MIT License](LICENSE).
 If you find SOTER useful, please cite our paper:
 
 ```bibtex
-@article{soter2026,
-  title   = {SOTER: TODO},
-  author  = {TODO},
-  journal = {arXiv preprint arXiv:XXXX.XXXXX},
-  year    = {2026}
+@article{chen2026soter,
+  title={SOTER: A Generative Time-Series Foundation Model for Wearable Human Physiological Signals},
+  author={Chen, Fangke and Chen, Sirry and Chen, Wei and Wei, Zhongyu},
+  journal={arXiv preprint arXiv:2609.16804},
+  year={2026}
 }
 ```
 
