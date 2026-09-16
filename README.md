@@ -4,7 +4,7 @@
 
 <div align="center">
 
-**[<a href="https://arxiv.org/abs/XXXX.XXXXX">Paper</a>]** <!-- TODO: replace with the SOTER arXiv link -->
+**[<a href="http://arxiv.org/abs/2609.16804">Paper</a>]** <!-- TODO: replace with the SOTER arXiv link -->
 **[<a href="https://huggingface.co/SII-fkchen/SOTER">Model Weights</a>]**
 **[<a href="https://github.com/SII-fkchen/SOTER">GitHub</a>]**
 
